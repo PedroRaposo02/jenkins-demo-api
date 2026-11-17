@@ -1,8 +1,171 @@
-# Ficha 06 - Jenkins (exercicios 4 a 9)
+# Ficha 06 - Jenkins
 
-API FastAPI simples usada para a ficha de Jenkins. Aqui ficam os prints e notas dos exercicios 4 ao 9.
+API FastAPI simples usada para a ficha de Jenkins. Aqui ficam os prints e notas dos exercicios todos.
 
 Nota: no meu setup o Jenkins está na porta 8100 em vez da 8080.
+
+---
+
+## Verificação inicial
+
+```
+$ docker --version
+Docker version 29.1.3, build 29.1.3-0ubuntu3~24.04.2
+$ docker compose version
+Docker Compose version v2.24.5
+$ docker info
+ Containers: 3
+  Running: 3
+ Server Version: 29.9.3
+ Operating System: Alpine Linux v3.24 (containerized)
+ ...
+$ git --version
+git version 2.43.0
+```
+
+---
+
+## Exercicio 01 - Instalar o Jenkins
+
+Criei o `infra/compose.yaml` da ficha (so mudei a porta para 8100) e arranquei so o jenkins:
+
+```
+docker compose up -d jenkins
+docker compose ps
+docker compose logs --tail=30 jenkins
+```
+
+Fui buscar a password inicial com:
+```
+docker exec jenkins-lab cat /var/jenkins_home/secrets/initialAdminPassword
+```
+Depois abri o jenkins no browser, meti a password, escolhi "Install suggested plugins" e criei o user admin.
+
+Em Manage Jenkins > Plugins confirmei que estavam instalados:
+
+| Plugin | Versão |
+|---|---|
+| Pipeline | 608.v67378e9d3db_1 |
+| Git plugin | 5.11.0 |
+| JUnit Plugin | 1458.1460.vd53b_087eeb_2c |
+| Timestamper | 1.30 |
+
+Vieram todos com os suggested plugins, nao tive de instalar nada.
+
+![ex01-2-plugin-timestamper.png](evidencias/ex01-2-plugin-timestamper.png)
+
+Dashboard:
+
+![ex01-1-dashboard.png](evidencias/ex01-1-dashboard.png)
+
+```
+$ docker compose ps
+NAME                 IMAGE                       SERVICE         STATUS          PORTS
+jenkins-ci-agent     infra-ci-agent              ci-agent        Up 56 minutes
+jenkins-docker-lab   docker:28-dind              docker-engine   Up 57 minutes   2375-2376/tcp
+jenkins-lab          jenkins/jenkins:lts-jdk21   jenkins         Up 2 hours      50000/tcp, 0.0.0.0:8100->8080/tcp
+```
+(este ps ja foi tirado mais tarde, por isso ja aparecem o agente e o docker-engine)
+
+O volume `jenkins_home` guarda os dados do jenkins, por isso se o container for recriado nao se perde a config.
+
+---
+
+## Exercicio 02 - Agente Jenkins
+
+Criei o `infra/Dockerfile.agent` e no jenkins fui a Manage Jenkins > Nodes > New Node:
+- Node name: `ci-python-docker`
+- Permanent Agent
+- Executors: 1
+- Remote root directory: `/home/jenkins/agent`
+- Labels: `ci-python-docker`
+- Usage: Only build jobs with label expressions matching this node
+- Launch method: Launch agent by connecting it to the controller
+
+![ex02-2-node-config.png](evidencias/ex02-2-node-config.png)
+
+Copiei a secret que aparece na pagina do agente para o `infra/.env` (`JENKINS_AGENT_SECRET=...`). Esse ficheiro nao vai para o git nem aparece aqui.
+
+```
+docker compose up -d --build ci-agent
+docker compose logs --tail=80 ci-agent
+```
+Nos logs aparece `INFO: WebSocket connection open` e `INFO: Connected`.
+
+![ex02-1-nodes-online.png](evidencias/ex02-1-nodes-online.png)
+
+Verificação das ferramentas:
+```
+$ docker exec jenkins-ci-agent sh -lc 'git --version && python3 --version && docker --version'
+git version 2.47.3
+Python 3.13.5
+OCI runtime exec failed: exec failed: unable to start container process: exec: "docker": executable file not found in $PATH
+```
+
+O git e o python estavam ok mas o docker nao. Fui ver e no Debian 13 (que é a base da imagem do agente) o pacote `docker.io` so tem o daemon, o comando `docker` esta no pacote `docker-cli`. Como o Dockerfile usa `--no-install-recommends` nao foi instalado. Acrescentei `docker-cli` no `Dockerfile.agent`:
+
+```dockerfile
+ curl ca-certificates docker.io docker-cli \
+```
+e fiz outra vez `docker compose up -d --build ci-agent`:
+
+```
+$ docker exec jenkins-ci-agent sh -lc 'git --version && python3 --version && docker --version'
+git version 2.47.3
+Python 3.13.5
+Docker version 26.1.5+dfsg1, build a72d7cd
+```
+
+Nesta fase o `docker info` ainda nao funciona porque o docker-engine do lab ainda esta desligado, como diz a ficha.
+
+---
+
+## Exercicio 03 - Freestyle job
+
+Criei um Freestyle project chamado `first-job`, marquei "Restrict where this project can be run" com a label `ci-python-docker` e pus o script da ficha no Execute shell.
+
+### Build #1 - SUCCESS
+
+![ex03-2-console-sucesso.png](evidencias/ex03-2-console-sucesso.png)
+
+```
+Building remotely on ci-python-docker in workspace /home/jenkins/agent/workspace/first-job
+Primeiro Job Jenkins
+Job: first-job
+Build: 1
+Workspace: /home/jenkins/agent/workspace/first-job
+Sistema: Linux
+Data UTC: Tue Nov 17 11:49:46 UTC 2026
+Finished: SUCCESS
+```
+
+Corre no agente e nao no controller (`Building remotely on ci-python-docker`). As variaveis `JOB_NAME`, `BUILD_NUMBER` e `WORKSPACE` sao dadas pelo jenkins.
+
+### Build #2 - FAILURE
+
+Acrescentei um exit no fim do script:
+
+![ex03-1-config-falha.png](evidencias/ex03-1-config-falha.png)
+
+![ex03-3-console-falha.png](evidencias/ex03-3-console-falha.png)
+
+```
+Sistema: Linux
+Data UTC: Tue Nov 17 11:50:06 UTC 2026
+/tmp/jenkins3094327463933621315.sh: 12: exit: Illegal number: -1
+Build step 'Execute shell' marked build as failure
+Finished: FAILURE
+```
+
+Pus `exit -1` em vez de `exit 1`. O `sh` nao aceita numeros negativos no exit e da erro "Illegal number", mas o resultado é o mesmo, o script sai com erro e o build fica FAILURE.
+
+### Build #3 - script reposto
+
+Tirei o exit e voltou a dar SUCCESS.
+
+![ex03-4-console-reposto.png](evidencias/ex03-4-console-reposto.png)
+
+![ex03-5-historico.png](evidencias/ex03-5-historico.png)
 
 ---
 
@@ -139,12 +302,7 @@ jenkins-docker-lab   docker:28-dind              docker-engine   Up 1 second
 jenkins-lab          jenkins/jenkins:lts-jdk21   jenkins         Up About an hour
 ```
 
-Quando fui testar o `docker version` no agente deu `exec: "docker": executable file not found in $PATH`. Fui ver e no Debian 13 (que é a base da imagem do agente) o pacote `docker.io` so tem o daemon, o comando `docker` esta no pacote `docker-cli`. Como o Dockerfile usa `--no-install-recommends` nao foi instalado. Acrescentei `docker-cli` no `Dockerfile.agent`:
-
-```dockerfile
- curl ca-certificates docker.io docker-cli \
-```
-e fiz `docker compose up -d --build ci-agent`. Depois ja funcionou:
+Confirmei que o agente ja fala com o engine:
 
 ```
 $ docker exec jenkins-ci-agent docker version
